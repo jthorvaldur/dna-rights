@@ -1,90 +1,109 @@
 """dna-rights CLI — Natural rights assertion toolkit."""
 
 import json
+import os
+import re
+import sys
+from pathlib import Path
+
 import click
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 console = Console()
 
-# --- Term mappings ---
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+TERMS_FILE = DATA_DIR / "terms.yaml"
 
-TERM_MAP = {
-    "children": {
-        "biological": "offspring",
-        "framework": "legal",
-        "jurisdiction": "State family court — treats the relationship as a legal construct subject to judicial modification.",
-        "implication": "Accepting 'children' accepts the court's jurisdiction over the relationship.",
-    },
-    "offspring": {
-        "biological": "offspring",
-        "framework": "natural",
-        "jurisdiction": "Natural law — the relationship is a biological fact not subject to court adjudication.",
-        "implication": "Asserting 'offspring' asserts a biological fact the court did not create and cannot destroy.",
-    },
-    "custody": {
-        "biological": "natural bond",
-        "framework": "legal",
-        "jurisdiction": "Statutory — 750 ILCS 5/602.5 allocates 'parenting time' as a divisible commodity.",
-        "implication": "Accepting 'custody' treats the parent-offspring bond as property to be allocated by a judge.",
-    },
-    "natural bond": {
-        "biological": "natural bond",
-        "framework": "natural",
-        "jurisdiction": "Natural law — the bond exists by biology and is not subject to allocation.",
-        "implication": "The bond is not divisible. It exists in full for both biological parents.",
-    },
-    "visitation": {
-        "biological": "access to offspring",
-        "framework": "legal",
-        "jurisdiction": "Statutory — the court grants 'permission' to see your own biological offspring.",
-        "implication": "Accepting 'visitation' implies you need the court's permission to access your own offspring.",
-    },
-    "access to offspring": {
-        "biological": "access to offspring",
-        "framework": "natural",
-        "jurisdiction": "Natural right — access to one's biological offspring is inherent, not granted.",
-        "implication": "No court permission is required to access your own biological offspring.",
-    },
-    "guardian": {
-        "biological": "parent",
-        "framework": "legal",
-        "jurisdiction": "Court-appointed — implies authority delegated by the state.",
-        "implication": "A 'guardian' holds a legal title granted by the court. A parent holds a natural bond.",
-    },
-    "parent": {
-        "biological": "parent",
-        "framework": "natural",
-        "jurisdiction": "Biological fact — established by DNA, not by court appointment.",
-        "implication": "Parentage is not a title granted by any authority. It is a fact of nature.",
-    },
-    "ward": {
-        "biological": "offspring",
-        "framework": "legal",
-        "jurisdiction": "Court-created — the offspring is treated as a subject of the court's authority.",
-        "implication": "A 'ward' belongs to the court's jurisdiction. Offspring belong to their biological parents.",
-    },
-    "best interest of the child": {
-        "biological": "natural right of the parent-offspring bond",
-        "framework": "legal",
-        "jurisdiction": "Statutory — a standard defined and applied by the court with broad discretion.",
-        "implication": "The court decides what is 'best' — substituting judicial judgment for the natural bond.",
-    },
-    "termination of parental rights": {
-        "biological": "attempted severance of a biological bond",
-        "framework": "legal",
-        "jurisdiction": "Statutory — the court purports to end a relationship it did not create.",
-        "implication": "The legal status may be terminated. The biological bond cannot be.",
-    },
-    "child support": {
-        "biological": "parental obligation to offspring",
-        "framework": "legal",
-        "jurisdiction": "Statutory — state-enforced financial obligation.",
-        "implication": "The natural duty to provide for offspring exists independent of any court order.",
-    },
-}
+# ---------------------------------------------------------------------------
+# Term database (YAML-backed, LLM-expandable)
+# ---------------------------------------------------------------------------
+
+def load_terms() -> dict:
+    """Load term mappings from YAML data file."""
+    if TERMS_FILE.exists():
+        return yaml.safe_load(TERMS_FILE.read_text()) or {}
+    return {}
+
+
+def save_terms(db: dict) -> None:
+    """Write terms back to YAML, preserving the header comment."""
+    header = (
+        "# terms.yaml — Natural rights term database\n"
+        "# Each term has: biological equivalent, framework (legal/natural), "
+        "jurisdiction, implication.\n"
+        "# New terms are generated by LLM and appended here.\n"
+        "# Source: dna-rights conceptual framework "
+        "(natural rights vs legal constructs)\n\n"
+    )
+    TERMS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TERMS_FILE.write_text(
+        header + yaml.dump(db, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    )
+
+
+def generate_term(term: str) -> dict | None:
+    """Use Claude to generate a natural rights term analysis."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+    except Exception:
+        return None
+
+    system = (
+        "You are a natural rights language analyst. You analyze legal and "
+        "natural rights terms through the lens of biological parentage and "
+        "natural law.\n\n"
+        "For each term, provide:\n"
+        "- biological: the natural/biological equivalent of this term "
+        "(e.g., 'children' → 'offspring', 'custody' → 'natural bond')\n"
+        "- framework: either 'legal' (state-created construct) or 'natural' "
+        "(exists by biology/nature)\n"
+        "- jurisdiction: what legal jurisdiction this term operates in "
+        "(e.g., 'Statutory — 750 ILCS...' or 'Natural law — ...')\n"
+        "- implication: what accepting or asserting this term means for "
+        "jurisdiction and standing (1-2 sentences)\n\n"
+        "Key principle: legal terms accept the court's jurisdiction. "
+        "Natural terms assert biological facts the court cannot adjudicate.\n\n"
+        "Respond ONLY with valid YAML (no markdown fences, no commentary) in this exact format:\n"
+        "biological: ...\n"
+        "framework: legal|natural\n"
+        "jurisdiction: ...\n"
+        "implication: ..."
+    )
+
+    console.print(f"[dim]Generating term analysis for '[/dim][bold]{term}[/bold][dim]'...[/dim]")
+
+    try:
+        resp = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            system=system,
+            messages=[{"role": "user", "content": f"Analyze the term: {term}"}],
+        )
+        text = resp.content[0].text.strip()
+        text = re.sub(r'^```\w*\n?', '', text)
+        text = re.sub(r'\n?```$', '', text)
+        entry = yaml.safe_load(text)
+        if isinstance(entry, dict) and all(
+            k in entry for k in ("biological", "framework", "jurisdiction", "implication")
+        ):
+            return entry
+    except Exception as e:
+        console.print(f"[red]Generation failed: {e}[/red]")
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Reframe patterns
+# ---------------------------------------------------------------------------
 
 REFRAME_PATTERNS = {
     "custody of": "natural bond with",
@@ -114,7 +133,9 @@ REFRAME_PATTERNS = {
     "ward": "offspring",
 }
 
-# --- Authority citations ---
+# ---------------------------------------------------------------------------
+# Authority citations
+# ---------------------------------------------------------------------------
 
 AUTHORITIES = {
     "natural": [
@@ -155,6 +176,10 @@ def _output(data: dict, fmt: str, title: str = ""):
                 console.print(Panel(content, title=section_title, border_style="cyan"))
 
 
+# ---------------------------------------------------------------------------
+# CLI group
+# ---------------------------------------------------------------------------
+
 @click.group()
 def main():
     """dna-rights: Natural rights assertion toolkit.
@@ -164,23 +189,107 @@ def main():
     pass
 
 
+# ---------------------------------------------------------------------------
+# rights compare
+# ---------------------------------------------------------------------------
+
 @main.command()
-@click.option(
-    "--relationship",
-    default="parent-offspring",
-    help="Relationship to assert (default: parent-offspring).",
-)
-@click.option(
-    "--evidence",
-    default="dna",
-    help="Basis for assertion (default: dna).",
-)
-@click.option(
-    "--format", "fmt",
-    type=click.Choice(["text", "json"]),
-    default="text",
-    help="Output format.",
-)
+@click.argument("term1")
+@click.argument("term2")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.option("--no-generate", is_flag=True, help="Don't generate missing terms via LLM.")
+def compare(term1, term2, fmt, no_generate):
+    """Side-by-side jurisdictional analysis of two terms.
+
+    Unknown terms are generated by LLM and saved to the term database.
+    """
+    db = load_terms()
+    t1 = term1.lower()
+    t2 = term2.lower()
+    generated = []
+
+    for t in [t1, t2]:
+        if t not in db:
+            if no_generate:
+                available = ", ".join(sorted(db.keys()))
+                console.print(f"[red]Term '{t}' not found.[/red]")
+                console.print(f"[dim]Available: {available}[/dim]")
+                sys.exit(1)
+            entry = generate_term(t)
+            if entry is None:
+                console.print(f"[red]Term '{t}' not found and generation failed.[/red]")
+                console.print("[dim]Check ANTHROPIC_API_KEY is set.[/dim]")
+                sys.exit(1)
+            db[t] = entry
+            generated.append(t)
+
+    if generated:
+        save_terms(db)
+
+    info1 = db[t1]
+    info2 = db[t2]
+
+    if fmt == "json":
+        _output(
+            {
+                "type": "term_comparison",
+                "term1": {"term": t1, **info1},
+                "term2": {"term": t2, **info2},
+                "generated": generated,
+            },
+            fmt,
+        )
+        return
+
+    table = Table(
+        title=f"Jurisdictional Comparison: '{t1}' vs '{t2}'",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="cyan",
+    )
+    table.add_column("Dimension", style="bold")
+    table.add_column(t1, style="red" if info1["framework"] == "legal" else "green")
+    table.add_column(t2, style="red" if info2["framework"] == "legal" else "green")
+
+    table.add_row("Framework", info1["framework"], info2["framework"])
+    table.add_row("Biological Equivalent", info1["biological"], info2["biological"])
+    table.add_row("Jurisdiction", info1["jurisdiction"], info2["jurisdiction"])
+    table.add_row("Implication", info1["implication"], info2["implication"])
+
+    console.print()
+    console.print(table)
+
+    if info1["framework"] != info2["framework"]:
+        legal_term = t1 if info1["framework"] == "legal" else t2
+        natural_term = t2 if info1["framework"] == "legal" else t1
+        console.print()
+        console.print(
+            Panel(
+                f"[bold]'{legal_term}'[/bold] operates in the [red]legal[/red] framework. "
+                f"[bold]'{natural_term}'[/bold] operates in the [green]natural[/green] framework.\n\n"
+                f"Using '{legal_term}' accepts the court's jurisdiction. "
+                f"Using '{natural_term}' asserts a biological fact the court cannot adjudicate.",
+                title="[bold]Jurisdictional Shift[/bold]",
+                border_style="yellow",
+            )
+        )
+
+    if generated:
+        console.print(
+            f"[dim]Generated: {', '.join(generated)}. "
+            f"Saved to {TERMS_FILE.name} ({len(db)} terms in database).[/dim]"
+        )
+    console.print()
+
+
+# ---------------------------------------------------------------------------
+# rights assert
+# ---------------------------------------------------------------------------
+
+@main.command("assert")
+@click.option("--relationship", default="parent-offspring", help="Relationship to assert.")
+@click.option("--evidence", default="dna", help="Basis for assertion.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def assert_(relationship, evidence, fmt):
     """Generate a formal assertion of natural rights based on biological parentage."""
     assertion_text = (
@@ -233,23 +342,14 @@ def assert_(relationship, evidence, fmt):
         )
 
 
+# ---------------------------------------------------------------------------
+# rights claim
+# ---------------------------------------------------------------------------
+
 @main.command()
-@click.option(
-    "--type", "claim_type",
-    default="offspring",
-    help="Type of claim (default: offspring).",
-)
-@click.option(
-    "--context",
-    default="court",
-    help="Context for the claim (default: court).",
-)
-@click.option(
-    "--format", "fmt",
-    type=click.Choice(["text", "json"]),
-    default="text",
-    help="Output format.",
-)
+@click.option("--type", "claim_type", default="offspring", help="Type of claim.")
+@click.option("--context", default="court", help="Context for the claim.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def claim(claim_type, context, fmt):
     """Draft a DNA-based standing claim for court submission."""
     sections = [
@@ -295,8 +395,7 @@ def claim(claim_type, context, fmt):
                 "claim_type": claim_type,
                 "context": context,
                 "sections": [
-                    {"title": title, "content": content}
-                    for title, content in sections
+                    {"title": t, "content": c} for t, c in sections
                 ],
                 "authorities": AUTHORITIES,
             },
@@ -316,97 +415,23 @@ def claim(claim_type, context, fmt):
         _output({"sections": sections}, fmt)
 
 
-@main.command()
-@click.argument("term1")
-@click.argument("term2")
-@click.option(
-    "--format", "fmt",
-    type=click.Choice(["text", "json"]),
-    default="text",
-    help="Output format.",
-)
-def compare(term1, term2, fmt):
-    """Side-by-side jurisdictional analysis of two terms."""
-    t1 = term1.lower()
-    t2 = term2.lower()
-
-    info1 = TERM_MAP.get(t1)
-    info2 = TERM_MAP.get(t2)
-
-    if fmt == "json":
-        _output(
-            {
-                "type": "term_comparison",
-                "term1": {"term": t1, **(info1 or {"note": "Term not in database"})},
-                "term2": {"term": t2, **(info2 or {"note": "Term not in database"})},
-            },
-            fmt,
-        )
-    else:
-        table = Table(
-            title=f"Jurisdictional Comparison: '{t1}' vs '{t2}'",
-            show_header=True,
-            header_style="bold cyan",
-            border_style="cyan",
-        )
-        table.add_column("Dimension", style="bold")
-        table.add_column(t1, style="red" if info1 and info1["framework"] == "legal" else "green")
-        table.add_column(t2, style="red" if info2 and info2["framework"] == "legal" else "green")
-
-        if info1 and info2:
-            table.add_row("Framework", info1["framework"], info2["framework"])
-            table.add_row("Biological Equivalent", info1["biological"], info2["biological"])
-            table.add_row("Jurisdiction", info1["jurisdiction"], info2["jurisdiction"])
-            table.add_row("Implication", info1["implication"], info2["implication"])
-        else:
-            if not info1:
-                table.add_row("Status", f"'{t1}' not in term database", "")
-            if not info2:
-                table.add_row("Status", "", f"'{t2}' not in term database")
-            if info1:
-                table.add_row("Framework", info1["framework"], "---")
-                table.add_row("Jurisdiction", info1["jurisdiction"], "---")
-            if info2:
-                table.add_row("Framework", "---", info2["framework"])
-                table.add_row("Jurisdiction", "---", info2["jurisdiction"])
-
-        console.print()
-        console.print(table)
-
-        if info1 and info2 and info1["framework"] != info2["framework"]:
-            console.print()
-            console.print(
-                Panel(
-                    f"[bold]'{t1}'[/bold] operates in the [red]{info1['framework']}[/red] framework. "
-                    f"[bold]'{t2}'[/bold] operates in the [green]{info2['framework']}[/green] framework.\n\n"
-                    f"Using '{t1}' accepts the court's jurisdiction. "
-                    f"Using '{t2}' asserts a biological fact the court cannot adjudicate.",
-                    title="[bold]Jurisdictional Shift[/bold]",
-                    border_style="yellow",
-                )
-            )
-
+# ---------------------------------------------------------------------------
+# rights reframe
+# ---------------------------------------------------------------------------
 
 @main.command()
 @click.argument("text")
-@click.option(
-    "--format", "fmt",
-    type=click.Choice(["text", "json"]),
-    default="text",
-    help="Output format.",
-)
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def reframe(text, fmt):
     """Rewrite statutory/legal language in natural rights terms."""
     original = text
     reframed = text
-
     changes = []
-    # Sort patterns by length (longest first) to avoid partial replacements
+
     sorted_patterns = sorted(REFRAME_PATTERNS.keys(), key=len, reverse=True)
 
     for legal_term in sorted_patterns:
         natural_term = REFRAME_PATTERNS[legal_term]
-        # Case-insensitive replacement
         lower_reframed = reframed.lower()
         idx = lower_reframed.find(legal_term.lower())
         while idx != -1:
@@ -418,38 +443,22 @@ def reframe(text, fmt):
 
     if fmt == "json":
         _output(
-            {
-                "type": "reframed_text",
-                "original": original,
-                "reframed": reframed,
-                "changes": changes,
-            },
+            {"type": "reframed_text", "original": original, "reframed": reframed, "changes": changes},
             fmt,
         )
     else:
         console.print()
-        console.print(
-            Panel(
-                f"[red strikethrough]{original}[/red strikethrough]",
-                title="[bold]Original (Legal Framing)[/bold]",
-                border_style="red",
-            )
-        )
-        console.print(
-            Panel(
-                f"[bold green]{reframed}[/bold green]",
-                title="[bold]Reframed (Natural Rights)[/bold]",
-                border_style="green",
-            )
-        )
+        console.print(Panel(
+            f"[red strikethrough]{original}[/red strikethrough]",
+            title="[bold]Original (Legal Framing)[/bold]", border_style="red",
+        ))
+        console.print(Panel(
+            f"[bold green]{reframed}[/bold green]",
+            title="[bold]Reframed (Natural Rights)[/bold]", border_style="green",
+        ))
 
         if changes:
-            table = Table(
-                title="Term Substitutions",
-                show_header=True,
-                header_style="bold",
-                border_style="cyan",
-            )
+            table = Table(title="Term Substitutions", show_header=True, header_style="bold", border_style="cyan")
             table.add_column("Legal Term", style="red")
             table.add_column("Natural Rights Term", style="green")
             for change in changes:
