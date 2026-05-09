@@ -16,8 +16,12 @@ ENV/
 # Environment / secrets
 .env
 .env.*
+!.env.example
 secrets.json
 credentials.json
+
+# Lockfile
+uv.lock
 
 # IDE
 .idea/
